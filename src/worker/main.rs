@@ -11,7 +11,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 use std::time::Duration;
-use sysinfo::Pid;
+use sysinfo::{Pid, ProcessRefreshKind};
 use zipf::ZipfDistribution;
 
 /// Gets the unix timestamp as a duration
@@ -186,7 +186,9 @@ fn main() {
 
             GenericDatabase::Redb(Arc::new(
                 redb::Builder::new()
-                    .set_cache_size(args.cache_size as usize)
+                    // 10% of the value passed to set_cache_size() gets reserved for the write txn buffer,
+                    // so we adjust accordingly to get a fair size.
+                    .set_cache_size(args.cache_size as usize / 9 * 10)
                     .create(data_dir.join("my_db.redb"))
                     .unwrap(),
             ))
@@ -215,7 +217,6 @@ fn main() {
             create_dir_all(&data_dir).unwrap();
             let mut env_opts = EnvOptions::new(&data_dir);
             env_opts.use_mmap = false;
-            env_opts.use_checksums = true;
             env_opts.page_cache_size = args.cache_size as usize;
             env_opts.wal_background_sync_interval =
                 (!args.fsync).then_some(Duration::from_millis(1_000));
@@ -301,12 +302,9 @@ fn main() {
 
             loop {
                 if let Ok(du_bytes) = fs_extra::dir::get_size(&data_dir) {
-                    sys.refresh_all();
-
-                    let cpu = sys.global_cpu_info().cpu_usage();
-
-                    let proc = sys.processes();
-                    let child = proc.get(&pid).unwrap();
+                    sys.refresh_process_specifics(pid, ProcessRefreshKind::everything());
+                    let child = sys.process(pid).unwrap();
+                    let cpu = child.cpu_usage();
 
                     let mem = child.memory() as f32;
                     let disk = child.disk_usage();
