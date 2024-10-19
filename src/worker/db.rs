@@ -15,6 +15,7 @@ pub struct DatabaseWrapper {
     pub delete_ops: Arc<AtomicU64>,
     pub scan_ops: Arc<AtomicU64>,
 
+    pub scan_latency: Arc<AtomicU64>,
     pub write_latency: Arc<AtomicU64>,
     pub read_latency: Arc<AtomicU64>,
 }
@@ -259,6 +260,79 @@ impl DatabaseWrapper {
             std::sync::atomic::Ordering::Relaxed,
         );
         self.read_ops
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        item
+    }
+
+    pub fn scan(&self, key: &[u8], n: usize) -> Option<Vec<u8>> {
+        let start = Instant::now();
+
+        let item = match &self.inner {
+            #[cfg(feature = "rocksdb")]
+            GenericDatabase::RocksDb(db) => unimplemented!(),
+
+            #[cfg(feature = "heed")]
+            GenericDatabase::Heed { .. } => {
+                unimplemented!()
+            }
+
+            GenericDatabase::Nebari { .. } => {
+                unimplemented!()
+            }
+            GenericDatabase::Fjall { keyspace: _, db } => db
+                .range(key..)
+                .take(10)
+                .last()
+                .map(|x| x.unwrap().1.to_vec()),
+            GenericDatabase::Sled(db) => db
+                .range(key..)
+                .take(10)
+                .last()
+                .map(|x| x.unwrap().1.to_vec()),
+            // GenericDatabase::Bloodstone(db) =>  unimplemented!(),
+            GenericDatabase::Jamm(..) => {
+                unimplemented!()
+            }
+            GenericDatabase::Persy(db) => {
+                let key = String::from_utf8_lossy(key);
+
+                let read_id = db
+                    .range::<String, persy::PersyId, _>("primary", &key.to_string()..)
+                    .unwrap();
+                read_id
+                    .take(10)
+                    .map(|(_, mut id)| db.read("data", &id.next().unwrap()).unwrap())
+                    .last()
+                    .flatten()
+            }
+            GenericDatabase::Redb(db) => {
+                let read_txn = db.begin_read().unwrap();
+                let table = read_txn.open_table(TABLE).unwrap();
+                table
+                    .range(key..)
+                    .unwrap()
+                    .take(n)
+                    .last()
+                    .map(|x| x.unwrap().1.value())
+            }
+            #[cfg(feature = "canopydb")]
+            GenericDatabase::CanopyDb { database } => {
+                let rx = database.begin_read().unwrap();
+                let tree = rx.get_tree(b"default").unwrap().unwrap();
+                tree.range(key..)
+                    .unwrap()
+                    .take(n)
+                    .last()
+                    .map(|b| b.unwrap().1.to_vec())
+            }
+        };
+
+        self.scan_latency.fetch_add(
+            start.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.scan_ops
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         item

@@ -52,6 +52,7 @@ type MetricEntry = {
 
   avg_write_latency: number;
   avg_read_latency: number;
+  avg_scan_latency: number;
 };
 
 const chartOptions: ApexChartProps["options"]["chart"] = {
@@ -219,6 +220,30 @@ function ReadLatencyHistory(props: { series: HistoryEntry[][] }) {
   />;
 }
 
+function ScanLatencyHistory(props: { series: HistoryEntry[][] }) {
+  const series = () => props.series.map((series, idx) => {
+    const metrics = series.slice(2);
+    const start = metrics[0].time_micro;
+
+    const setupInfo = series[1] as unknown as { backend: string, workload: string };
+
+    return {
+      name: setupInfo.backend,
+      data: metrics.map(({ time_micro, avg_scan_latency }) => ({
+        x: (time_micro - start) / 1000 / 1000,
+        y: (avg_scan_latency / 1000),
+      })),
+      color: colors[idx % colors.length]
+    } satisfies ApexAxisChartSeries[0]
+  });
+
+  return <LineChart
+    yFormatter={(n) => `${n.toFixed(1)}µs`}
+    title="Average scan latency (lower is better)"
+    series={series()}
+  />;
+}
+
 function WriteAmpHistory(props: { series: HistoryEntry[][] }) {
   const series = () => props.series.map((series, idx) => {
     const metrics = series.slice(2);
@@ -270,7 +295,7 @@ function ReadAmpHistory(props: { series: HistoryEntry[][] }) {
     series={series()}
     yaxis={{
       min: 0,
-      max: (n) => Math.min(1_000, n),
+      max: (n) => Math.min(10, n),
     }}
   />;
 }
@@ -655,6 +680,7 @@ function App() {
           <div class="grid md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-4">
             <WriteLatencyHistory series={items()} />
             <ReadLatencyHistory series={items()} />
+            <ScanLatencyHistory series={items()} />
           </div>
         </div>
       </Show>

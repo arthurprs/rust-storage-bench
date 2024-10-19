@@ -3,6 +3,7 @@ mod db;
 use crate::db::DatabaseWrapper;
 use clap::Parser;
 use db::GenericDatabase;
+use fjall::{BlobCache, KvSeparationOptions};
 use rand::{distributions::Distribution, prelude::*};
 use rust_storage_bench::{Args, Backend, Workload};
 use std::fs::{create_dir_all, remove_dir_all};
@@ -120,18 +121,38 @@ fn main() {
                 }
             };
 
+            let (block_cache_size, blob_cache_size) =
+                if args.value_size >= KvSeparationOptions::default().separation_threshold {
+                    (args.cache_size / 10, args.cache_size / 10 * 9)
+                } else {
+                    (args.cache_size, 0)
+                };
+
             let config = fjall::Config::new(&data_dir)
                 .fsync_ms(if args.fsync { None } else { Some(1_000) })
-                .max_write_buffer_size(args.write_buffer_size as u64)
-                .block_cache(BlockCache::with_capacity_bytes(args.cache_size.into()).into());
+                .block_cache(BlockCache::with_capacity_bytes(block_cache_size as u64).into())
+                .blob_cache(BlobCache::with_capacity_bytes(blob_cache_size as u64).into())
+                .max_write_buffer_size(args.write_buffer_size as u64);
 
             let create_opts = PartitionCreateOptions::default()
                 .block_size(args.lsm_block_size.into())
                 .compaction_strategy(compaction_strategy)
+                .with_kv_separation(KvSeparationOptions::default())
                 .max_memtable_size(args.write_buffer_size as u32);
 
             let keyspace = config.open().unwrap();
             let db = keyspace.open_partition("data", create_opts).unwrap();
+
+            if args.value_size >= KvSeparationOptions::default().separation_threshold {
+                use fjall::GarbageCollection;
+                let blobs = db.clone();
+                std::thread::spawn(move || loop {
+                    blobs.gc_scan().unwrap();
+                    blobs.gc_with_space_amp_target(3.0).unwrap();
+                    blobs.gc_with_staleness_threshold(0.9).unwrap();
+                    std::thread::sleep(Duration::from_secs(10));
+                });
+            }
 
             GenericDatabase::Fjall { keyspace, db }
         }
@@ -216,7 +237,6 @@ fn main() {
             use canopydb::*;
             create_dir_all(&data_dir).unwrap();
             let mut env_opts = EnvOptions::new(&data_dir);
-            env_opts.use_mmap = false;
             env_opts.page_cache_size = args.cache_size as usize;
             env_opts.wal_background_sync_interval =
                 (!args.fsync).then_some(Duration::from_millis(1_000));
@@ -239,6 +259,7 @@ fn main() {
         read_latency: Default::default(),
         write_latency: Default::default(),
         real_data_size: Default::default(),
+        scan_latency: Default::default(),
     };
 
     {
@@ -299,6 +320,7 @@ fn main() {
 
             let mut prev_write_ops = 0;
             let mut prev_read_ops = 0;
+            let mut prev_scan_ops = 0;
 
             loop {
                 if let Ok(du_bytes) = fs_extra::dir::get_size(&data_dir) {
@@ -311,6 +333,7 @@ fn main() {
 
                     let write_ops = db.write_ops.load(Relaxed);
                     let read_ops = db.read_ops.load(Relaxed);
+                    let scan_ops = db.scan_ops.load(Relaxed);
 
                     let real_dataset_size_bytes = db.real_data_size.load(Relaxed) as f64;
                     let space_amp = du_bytes as f64 / real_dataset_size_bytes;
@@ -318,23 +341,27 @@ fn main() {
                     let write_dataset_size_bytes =
                         write_ops as f64 * (args.key_size as f64 + args.value_size as f64);
                     let write_amp = disk.total_written_bytes as f64 / write_dataset_size_bytes;
-                    let read_dataset_size_bytes =
-                        read_ops as f64 * (args.key_size as f64 + args.value_size as f64);
+                    let read_dataset_size_bytes = (read_ops + scan_ops) as f64
+                        * (args.key_size as f64 + args.value_size as f64);
                     let read_amp = disk.total_read_bytes as f64 / read_dataset_size_bytes;
 
                     let accumulated_write_latency = db
                         .write_latency
                         .fetch_min(0, std::sync::atomic::Ordering::Release);
-
                     let accumulated_read_latency = db
                         .read_latency
+                        .fetch_min(0, std::sync::atomic::Ordering::Release);
+                    let accumulated_scan_latency = db
+                        .scan_latency
                         .fetch_min(0, std::sync::atomic::Ordering::Release);
 
                     let write_ops_since = write_ops - prev_write_ops;
                     let read_ops_since = read_ops - prev_read_ops;
+                    let scan_ops_since = scan_ops - prev_scan_ops;
 
                     let avg_write_latency = accumulated_write_latency / write_ops_since.max(1);
                     let avg_read_latency = accumulated_read_latency / read_ops_since.max(1);
+                    let avg_scan_latency = accumulated_scan_latency / scan_ops_since.max(1);
 
                     let json = serde_json::json!({
                         "backend": backend,
@@ -359,10 +386,12 @@ fn main() {
                         "dataset_size": real_dataset_size_bytes,
                         "avg_write_latency": avg_write_latency,
                         "avg_read_latency": avg_read_latency,
+                        "avg_scan_latency": avg_scan_latency,
                     });
 
                     prev_write_ops = write_ops;
                     prev_read_ops = read_ops;
+                    prev_scan_ops = scan_ops;
 
                     writeln!(
                         &mut file_writer,
@@ -605,10 +634,10 @@ fn main() {
                                     .fetch_add((key.len() + val.len()) as u64, Relaxed);
                                 records += 1;
                             } else {
-                                let key = format!("{user_id}:{:0>10}", records - 1);
+                                let key = format!("{user_id}:{:0>10}", records.saturating_sub(10));
                                 let key = key.as_bytes();
 
-                                db.get(key).unwrap();
+                                db.scan(key, 10).unwrap();
                             }
                         }
                     })
@@ -672,10 +701,10 @@ fn main() {
                                     .fetch_add((key.len() + val.len()) as u64, Relaxed);
                                 records += 1;
                             } else {
-                                let key = format!("{user_id}:{:0>10}", records - 1);
+                                let key = format!("{user_id}:{:0>10}", records.saturating_sub(11));
                                 let key = key.as_bytes();
 
-                                db.get(key).unwrap();
+                                db.scan(key, 10).unwrap();
                             }
                         }
                     })
@@ -703,7 +732,7 @@ fn main() {
                         let mut val: Vec<u8> = vec![0; args.value_size as usize];
                         fill_value(&args, &mut rng, &mut val);
 
-                        let key = format!("{user_id:0>2}:{x:0>10}");
+                        let key = format!("{user_id}:{x:0>10}");
                         let key = key.as_bytes();
 
                         db.insert(key, &val, false, args.clone());
@@ -744,8 +773,8 @@ fn main() {
                                     args.zipf_exponent,
                                 )
                                 .unwrap();
-                                let x = zipf.sample(&mut rng);
-                                let x = map_key(x as u32);
+                                let x = records - zipf.sample(&mut rng) as u32;
+                                let x = map_key(x);
 
                                 let key = format!("{user_id}:{x:0>10}");
                                 let key = key.as_bytes();
@@ -819,13 +848,116 @@ fn main() {
                                     args.zipf_exponent,
                                 )
                                 .unwrap();
-                                let x = zipf.sample(&mut rng);
-                                let x = map_key(x as u32);
+                                let x = records - zipf.sample(&mut rng) as u32;
+                                let x = map_key(x);
 
                                 let key = format!("{user_id}:{x:0>10}");
                                 let key = key.as_bytes();
 
                                 db.get(key).unwrap();
+                            }
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            start_killer(args.minutes.into());
+
+            for t in threads {
+                t.join().unwrap();
+            }
+        }
+
+        Workload::TaskH => {
+            let users = args.threads;
+
+            {
+                let mut rng = rand::thread_rng();
+
+                for idx in 0..users {
+                    let user_id = format!("user{idx:0>2}");
+
+                    for x in 0..args.items {
+                        let x = map_key(x);
+                        let mut val: Vec<u8> = vec![0; args.value_size as usize];
+                        fill_value(&args, &mut rng, &mut val);
+
+                        let key = format!("{user_id}:{x:0>10}");
+                        let key = key.as_bytes();
+
+                        db.insert(key, &val, false, args.clone());
+                        db.real_data_size
+                            .fetch_add((key.len() + val.len()) as u64, Relaxed);
+                    }
+                }
+            }
+
+            let threads = (0..users)
+                .map(|idx| {
+                    let args = args.clone();
+                    let db = db.clone();
+                    let user_id = format!("user{idx:0>2}");
+
+                    std::thread::spawn(move || {
+                        let mut rng = rand::thread_rng();
+                        let mut records = args.items;
+
+                        loop {
+                            let choice: u32 = rng.gen_range(0..100);
+
+                            match choice {
+                                0..50 => {
+                                    let zipf = ZipfDistribution::new(
+                                        (records - 1) as usize,
+                                        args.zipf_exponent,
+                                    )
+                                    .unwrap();
+                                    let x = records - zipf.sample(&mut rng) as u32;
+                                    let x = map_key(x);
+
+                                    let key = format!("{user_id}:{x:0>10}");
+                                    let key = key.as_bytes();
+
+                                    db.get(key).unwrap();
+                                }
+                                50..70 => {
+                                    let zipf = ZipfDistribution::new(
+                                        (records - 1) as usize,
+                                        args.zipf_exponent,
+                                    )
+                                    .unwrap();
+                                    let x = records - zipf.sample(&mut rng) as u32;
+                                    let x = map_key(x.saturating_sub(10));
+
+                                    let key = format!("{user_id}:{:0>10}", x);
+                                    let key = key.as_bytes();
+
+                                    db.scan(key, 10).unwrap();
+                                }
+                                70.. => {
+                                    let mut val: Vec<u8> = vec![0; args.value_size as usize];
+                                    fill_value(&args, &mut rng, &mut val);
+                                    let is_insert = choice >= 80;
+                                    let mut x = records;
+                                    if !is_insert {
+                                        let zipf = ZipfDistribution::new(
+                                            (records - 1) as usize,
+                                            args.zipf_exponent,
+                                        )
+                                        .unwrap();
+                                        x -= zipf.sample(&mut rng) as u32
+                                    }
+                                    let x = map_key(x);
+                                    let key = format!("{user_id}:{x:0>10}");
+                                    let key = key.as_bytes();
+
+                                    db.insert(key, &val, args.fsync, args.clone());
+                                    if is_insert {
+                                        db.real_data_size
+                                            .fetch_add((key.len() + val.len()) as u64, Relaxed);
+                                        records += 1;
+                                    }
+                                }
                             }
                         }
                     })

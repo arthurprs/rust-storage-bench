@@ -51,14 +51,14 @@ impl std::fmt::Display for Backend {
 #[derive(Copy, Debug, Clone, ValueEnum, Serialize, PartialEq, Eq)]
 #[clap(rename_all = "kebab_case")]
 pub enum Workload {
-    /// Workload A: Update heavy workload
+    /// Workload A: Overwrite heavy workload
     ///
     /// Application example: Session store recording recent actions
     TaskA,
 
     /// Workload B: Read mostly workload
     ///
-    /// Application example: photo tagging; add a tag is an update, but most operations are to read tags
+    /// Application example: photo tagging; add a tag is an overwrite, but most operations are to read tags
     TaskB,
 
     /// Workload C: Read only
@@ -66,21 +66,24 @@ pub enum Workload {
     /// Application example: user profile cache, where profiles are constructed elsewhere (e.g., Hadoop)
     TaskC,
 
-    /// Workload D: Read latest workload with light inserts
+    /// Workload D: Scan latest workload with light inserts
     ///
-    /// Application example: user status updates; people want to read the latest
+    /// Application example: user status updates; people want to scan the latest (zipfian)
     TaskD,
 
-    /// Workload E: Read latest workload with heavy inserts
+    /// Workload E: Scan latest workload with heavy inserts
     ///
-    /// Application example: Event logging, getting the latest events
+    /// Application example: Event logging, scanning the latest events (zipfian)
     TaskE,
 
-    /// Workload F: Read zipfian workload with light inserts
+    /// Workload F: Read zipfian workload (bias toward last inserted) with light inserts
     TaskF,
 
-    /// Workload G: Read zipfian workload with heavy inserts
+    /// Workload G: Read zipfian workload (bias toward last inserted) with heavy inserts
     TaskG,
+
+    /// Workload H: Combined workload, 50% reads, 20% scans, 10% overwrites and 20% inserts
+    TaskH,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, clap::ValueEnum)]
