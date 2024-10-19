@@ -270,7 +270,14 @@ impl DatabaseWrapper {
 
         let item = match &self.inner {
             #[cfg(feature = "rocksdb")]
-            GenericDatabase::RocksDb(db) => unimplemented!(),
+            GenericDatabase::RocksDb(db) => db
+                .iterator(rocksdb::IteratorMode::From(
+                    key,
+                    rocksdb::Direction::Forward,
+                ))
+                .take(n)
+                .map(|x| x.unwrap().1.to_vec())
+                .last(),
 
             #[cfg(feature = "heed")]
             GenericDatabase::Heed { .. } => {
@@ -282,14 +289,14 @@ impl DatabaseWrapper {
             }
             GenericDatabase::Fjall { keyspace: _, db } => db
                 .range(key..)
-                .take(10)
-                .last()
-                .map(|x| x.unwrap().1.to_vec()),
+                .take(n)
+                .map(|x| x.unwrap().1.to_vec())
+                .last(),
             GenericDatabase::Sled(db) => db
                 .range(key..)
                 .take(10)
-                .last()
-                .map(|x| x.unwrap().1.to_vec()),
+                .map(|x| x.unwrap().1.to_vec())
+                .last(),
             // GenericDatabase::Bloodstone(db) =>  unimplemented!(),
             GenericDatabase::Jamm(..) => {
                 unimplemented!()
@@ -301,7 +308,7 @@ impl DatabaseWrapper {
                     .range::<String, persy::PersyId, _>("primary", &key.to_string()..)
                     .unwrap();
                 read_id
-                    .take(10)
+                    .take(n)
                     .map(|(_, mut id)| db.read("data", &id.next().unwrap()).unwrap())
                     .last()
                     .flatten()
@@ -313,8 +320,8 @@ impl DatabaseWrapper {
                     .range(key..)
                     .unwrap()
                     .take(n)
-                    .last()
                     .map(|x| x.unwrap().1.value())
+                    .last()
             }
             #[cfg(feature = "canopydb")]
             GenericDatabase::CanopyDb { database } => {
@@ -323,8 +330,8 @@ impl DatabaseWrapper {
                 tree.range(key..)
                     .unwrap()
                     .take(n)
-                    .last()
                     .map(|b| b.unwrap().1.to_vec())
+                    .last()
             }
         };
 

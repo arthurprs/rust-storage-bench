@@ -87,6 +87,14 @@ fn main() {
             create_dir_all(&data_dir).unwrap();
 
             let mut opts = rocksdb::Options::default();
+            opts.set_write_buffer_size(args.write_buffer_size as usize);
+            opts.increase_parallelism(std::thread::available_parallelism().unwrap().get() as _);
+            let mut bo = rocksdb::BlockBasedOptions::default();
+            bo.set_block_cache(&rocksdb::Cache::new_lru_cache(args.cache_size as _));
+            bo.set_pin_l0_filter_and_index_blocks_in_cache(true);
+            bo.set_cache_index_and_filter_blocks(true);
+            bo.set_bloom_filter(10.0, false);
+            opts.set_block_based_table_factory(&bo);
             opts.set_manual_wal_flush(true);
             opts.create_if_missing(true);
 
