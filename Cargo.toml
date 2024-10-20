@@ -38,7 +38,7 @@ heed = { version = "0.20.0", optional = true }
 rocksdb = { version = "0.22.0", optional = true, default-features = false, features = [
   "lz4",
 ] }
-canopydb = { path = "../Capy", optional = true }
+canopydb = { version = "0.1", optional = true }
 jemallocator = { version = "0.5.2", optional = true }
 
 [profile.release]
