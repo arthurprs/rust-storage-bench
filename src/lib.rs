@@ -29,10 +29,10 @@ impl std::fmt::Display for Backend {
             match self {
                 Self::Sled => "sled 0.34.7",
                 // Self::Bloodstone => "sled 1.0.0-alpha.118",
-                Self::Fjall => "fjall 2.1",
+                Self::Fjall => "fjall 2.5",
                 Self::Persy => "persy 1.5.0",
                 Self::JammDb => "jammdb 0.11.0",
-                Self::Redb => "redb 2.1.4",
+                Self::Redb => "redb 2.4.0",
                 Self::Nebari => "nebari 0.5.5",
 
                 #[cfg(feature = "heed")]
@@ -42,7 +42,7 @@ impl std::fmt::Display for Backend {
                 Self::RocksDb => "rocksdb 0.22.0",
 
                 #[cfg(feature = "canopydb")]
-                Self::CanopyDb => "canopy 0",
+                Self::CanopyDb => "canopy 0.2",
             }
         )
     }
@@ -166,6 +166,9 @@ pub struct Args {
 
     #[arg(long, default_value_t = 1)]
     pub minutes: u16,
+
+    #[arg(long, default_value_t = false)]
+    pub capy_multi_writer: bool,
 
     /// If set, use a random keyspace, where the hot keys (zipf distribution)
     /// are distributed throughout the keyspace.

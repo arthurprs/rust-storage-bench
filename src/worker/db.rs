@@ -183,13 +183,19 @@ impl DatabaseWrapper {
             }
             #[cfg(feature = "canopydb")]
             GenericDatabase::CanopyDb { database } => {
-                let tx = database.begin_write().unwrap();
-                let options = canopydb::TreeOptions::default();
-                let mut tree = tx.get_or_create_tree_with(b"default", options).unwrap();
-                tree.insert(key, value).unwrap();
-                drop(tree);
+                loop {
+                    let tx = database.begin_write_with(_args.capy_multi_writer).unwrap();
+                    let options = canopydb::TreeOptions::default();
+                    let mut tree = tx.get_or_create_tree_with(b"default", options).unwrap();
+                    tree.insert(key, value).unwrap();
+                    drop(tree);
 
-                tx.commit().unwrap();
+                    match tx.commit() {
+                        Ok(_) => break,
+                        Err(canopydb::Error::WriteConflict) => continue,
+                        Err(e) => panic!("{e}"),
+                    }
+                }
                 if durable {
                     database.sync().unwrap();
                 }
